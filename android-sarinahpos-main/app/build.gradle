@@ -1,0 +1,85 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace "com.sarinah.pos"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.sarinah.pos"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        // Hindari emulator x86/x86_64 agar JNA native OK.
+        ndk { abiFilters "armeabi-v7a", "arm64-v8a" }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles(
+                    getDefaultProguardFile('proguard-android-optimize.txt'),
+                    'proguard-rules.pro'
+            )
+        }
+        debug { minifyEnabled false }
+    }
+
+    // GeckoView & AGP 8.x nyaman di Java 17
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        resources {
+            excludes += [
+                    "META-INF/DEPENDENCIES",
+                    "META-INF/INDEX.LIST",
+                    "META-INF/AL2.0",
+                    "META-INF/LGPL2.1"
+            ]
+        }
+    }
+}
+
+// ⚠️ JANGAN tambahkan 'repositories { }' di file module ini
+
+def GECKOVIEW_VERSION = "141.0" // kalau belum ketemu, coba "140.0" atau "142.0"
+
+dependencies {
+    // GeckoView (tanpa Chromium/WebView)
+  //  implementation "org.mozilla.geckoview:geckoview:140.0.+"
+
+
+    // AAR lokal (AutoReplyPrint)
+    implementation files('libs/autoreplyprint.aar')
+
+    // JNA — aktifkan jika AAR AutoReplyPrint kamu TIDAK membundle JNA.
+    // implementation "net.java.dev.jna:jna:5.13.0"
+
+    // ZXing (jika dipakai)
+    implementation 'com.google.zxing:core:3.5.3'
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+
+    // AndroidX & Material
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+
+    implementation 'com.google.android.gms:play-services-base:18.7.2'
+
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+    implementation "androidx.webkit:webkit:1.11.0"
+    debugImplementation  "com.github.chuckerteam.chucker:library:4.1.0"
+    releaseImplementation "com.github.chuckerteam.chucker:library-no-op:4.1.0"
+
+    // Samakan OkHttp ke 4.12.x (Chucker 4.1.0 pakai ini)
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
+
+}

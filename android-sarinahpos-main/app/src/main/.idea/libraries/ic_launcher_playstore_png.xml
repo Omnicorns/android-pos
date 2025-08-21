@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="ic_launcher-playstore.png">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/ic_launcher-playstore.png.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

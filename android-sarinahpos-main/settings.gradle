@@ -1,0 +1,22 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+        // plugin Android di-resolve dari sini
+    }
+}
+
+dependencyResolutionManagement {
+    // Pakai repos dari settings (bukan dari module)
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+        // Wajib untuk GeckoView
+        maven { url "https://maven.mozilla.org/maven2/" }
+    }
+}
+
+rootProject.name = "Sarinah POS"
+include(":app")
