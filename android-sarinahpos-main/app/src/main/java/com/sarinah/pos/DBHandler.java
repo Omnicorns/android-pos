@@ -14,7 +14,7 @@ public class DBHandler extends SQLiteOpenHelper {
 
     // creating a constant variables for our database.
     // below variable is for our database name.
-    private static final String DB_NAME = "sarinah-pos";
+    private static final String DB_NAME = "sarinah_4_juni";
 
     // below int is our database version
     private static final int DB_VERSION = 1;
