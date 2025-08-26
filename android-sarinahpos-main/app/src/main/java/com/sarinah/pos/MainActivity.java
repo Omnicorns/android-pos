@@ -1,6 +1,6 @@
 package com.sarinah.pos;
 
-import android.annotation.SuppressLint;
+
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
@@ -60,7 +60,6 @@ import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -69,9 +68,6 @@ import java.util.Calendar;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * MainActivity — WebView POS + Scanner + Print + Anti-CORS
- */
 public class MainActivity extends AppCompatActivity {
 
     // ============== KONFIG ==============
@@ -101,14 +97,24 @@ public class MainActivity extends AppCompatActivity {
     private ProgressBar progressBar;
     private WebView primary;
 
+    // ============== SCAN STATE ==============
+    // Gunakan flag untuk aktifkan HID/broadcast HANYA di halaman POS
+    private volatile boolean scannerActive = false;
+
     // ============== SCAN (HID) ==============
-    private volatile boolean scannerActive = false; // aktif hanya di /pos/web
+    // Perbaikan utama: capture karakter PERTAMA, debounce lebih longgar, dan CONSUME event saat burst
     private final StringBuilder scanBuffer = new StringBuilder();
     private long lastKeystroke = 0L;
     private final Handler scanHandler = new Handler(Looper.getMainLooper());
-    private Runnable scanTimeoutRunnable;
-    private static final int SCAN_BURST_GAP_MS = 15;
-    private static final int SCAN_FINALIZE_TIMEOUT_MS = 60;
+    private final Runnable scanFinalizeTask = this::runFinalizeNow;
+
+    // Lebihkan toleransi default supaya tidak cepat finalize di tengah scan
+    private static final int SCAN_BURST_GAP_MS = 35;         // antar key (HID)
+    private static final int SCAN_FINALIZE_TIMEOUT_MS = 150; // idle sebelum finalize
+
+    // De-dupe antar sumber (HID vs Broadcast)
+    private volatile long lastScanTs = 0L;
+    private volatile String lastScanCode = null;
 
     // ============== SCAN (Broadcast) ==============
     private BroadcastReceiver scanReceiver;
@@ -261,7 +267,7 @@ public class MainActivity extends AppCompatActivity {
                 if (takePictureIntent.resolveActivity(getPackageManager()) != null) {
                     File photoFile = null;
                     try { photoFile = createImageFile(); takePictureIntent.putExtra("PhotoPath", mCM); }
-                    catch (IOException ex) { Log.e("Webview", "Image file creation failed", ex); }
+                    catch (Exception ex) { Log.e("Webview", "Image file creation failed", ex); }
                     if (photoFile != null) {
                         mCM = "file:" + photoFile.getAbsolutePath();
                         takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, Uri.fromFile(photoFile));
@@ -303,76 +309,7 @@ public class MainActivity extends AppCompatActivity {
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) { return !isAllowed(request.getUrl()); }
             @Override public boolean shouldOverrideUrlLoading(WebView view, String url) { try { return !isAllowed(Uri.parse(url)); } catch (Exception e) { return true; } }
 
-            // CORS helper (GET saja). POST/PUT pakai Android.postJson()
-            @Override
-            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
-                try {
-                    if (req == null) return super.shouldInterceptRequest(view, req);
-                    Uri u = req.getUrl();
-                    if (u == null) return super.shouldInterceptRequest(view, req);
-
-                    boolean httpish = "http".equalsIgnoreCase(u.getScheme()) || "https".equalsIgnoreCase(u.getScheme());
-                    boolean cross = !isAllowed(u);
-                    String method = req.getMethod() == null ? "GET" : req.getMethod().toUpperCase();
-                    if (!httpish || !cross || !"GET".equals(method)) {
-                        return super.shouldInterceptRequest(view, req);
-                    }
-
-                    HttpURLConnection c = (HttpURLConnection) new URL(u.toString()).openConnection();
-                    c.setInstanceFollowRedirects(true);
-                    Map<String, String> h = req.getRequestHeaders();
-                    if (h != null) {
-                        for (Map.Entry<String,String> e : h.entrySet()) {
-                            String k = e.getKey();
-                            if (k == null) continue;
-                            if ("origin".equalsIgnoreCase(k) || "referer".equalsIgnoreCase(k)) continue;
-                            c.setRequestProperty(k, e.getValue());
-                        }
-                    }
-                    c.setConnectTimeout(15000);
-                    c.setReadTimeout(30000);
-                    c.connect();
-
-                    int code = c.getResponseCode();
-                    InputStream is = (code >= 200 && code < 300) ? c.getInputStream() : c.getErrorStream();
-                    if (is == null) return super.shouldInterceptRequest(view, req);
-
-                    BufferedInputStream bis = new BufferedInputStream(is);
-                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    byte[] buf = new byte[8192];
-                    int n;
-                    while ((n = bis.read(buf)) > 0) baos.write(buf, 0, n);
-                    bis.close();
-                    byte[] data = baos.toByteArray();
-
-                    String contentType = c.getHeaderField("Content-Type");
-                    String mime = "text/plain";
-                    String enc = "utf-8";
-                    if (contentType != null) {
-                        String ct = contentType.toLowerCase();
-                        // ambil MIME tanpa parameter ;charset=...
-                        int semi = ct.indexOf(';');
-                        String justMime = (semi >= 0 ? ct.substring(0, semi) : ct).trim();
-                        if (!justMime.isEmpty()) mime = justMime;
-                        int cs = ct.indexOf("charset=");
-                        if (cs >= 0) enc = ct.substring(cs + 8).trim();
-                    }
-
-                    Map<String, String> respHeaders = new HashMap<>();
-                    respHeaders.put("Access-Control-Allow-Origin", "*");
-                    respHeaders.put("Access-Control-Allow-Credentials", "true");
-                    respHeaders.put("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
-                    respHeaders.put("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-
-                    return new WebResourceResponse(mime, enc, code, c.getResponseMessage(),
-                            respHeaders, new ByteArrayInputStream(data));
-                } catch (Exception e) {
-                    Log.w("CORS", "intercept GET failed", e);
-                    return super.shouldInterceptRequest(view, req);
-                }
-            }
-
-            @Override public void onPageStarted(WebView view, String url, Bitmap favicon) {
+            @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
                 progressBar.setVisibility(View.VISIBLE);
                 if (DEV_VERBOSE_JS_LOG) {
@@ -386,6 +323,7 @@ public class MainActivity extends AppCompatActivity {
                 super.onPageFinished(view, url);
                 showOffline(false); statusView.setText("Online"); progressBar.setVisibility(View.GONE);
                 view.requestFocus(); view.requestFocusFromTouch();
+                // Aktifkan scanner hanya di halaman POS (biar tidak “nembak” di tempat lain)
                 scannerActive = (url != null && url.contains("/pos/web"));
             }
         });
@@ -405,7 +343,6 @@ public class MainActivity extends AppCompatActivity {
         if (primary != null) primary.setEnabled(!show);
     }
 
-    // ============== Focus (biar key masuk lagi) ==============
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus && primary != null) { primary.requestFocus(); primary.requestFocusFromTouch(); }
@@ -452,11 +389,13 @@ public class MainActivity extends AppCompatActivity {
     // ============== SCANNER (HID) ==============
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        // Proses HID hanya saat halaman POS aktif
         if (!scannerActive) return super.dispatchKeyEvent(event);
 
         if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
             int keyCode = event.getKeyCode();
 
+            // Abaikan modifier
             if (keyCode == KeyEvent.KEYCODE_SHIFT_LEFT || keyCode == KeyEvent.KEYCODE_SHIFT_RIGHT
                     || keyCode == KeyEvent.KEYCODE_ALT_LEFT || keyCode == KeyEvent.KEYCODE_ALT_RIGHT
                     || keyCode == KeyEvent.KEYCODE_CTRL_LEFT || keyCode == KeyEvent.KEYCODE_CTRL_RIGHT
@@ -467,100 +406,173 @@ public class MainActivity extends AppCompatActivity {
             long now = System.currentTimeMillis();
             boolean burst = (now - lastKeystroke) <= SCAN_BURST_GAP_MS;
 
+            // ENTER mengakhiri burst
             if (keyCode == KeyEvent.KEYCODE_ENTER) {
-                if (scanBuffer.length() > 0) runFinalizeNow(); // jangan consume
-                return super.dispatchKeyEvent(event);
+                if (scanBuffer.length() > 0) runFinalizeNow();
+                return true; // consume enter dari scanner
             }
 
             int uc = event.getUnicodeChar();
             boolean hasModifier = event.isShiftPressed() || event.isAltPressed() || event.isCtrlPressed() || event.isMetaPressed();
-            if (uc != 0 && !hasModifier && (burst || scanBuffer.length() > 0)) {
+
+            // **Perbaikan utama**: tangkap KARAKTER PERTAMA juga (mulai buffer)
+            if (uc != 0 && !hasModifier) {
                 scanBuffer.append((char) uc);
                 lastKeystroke = now;
                 scheduleScanFinalize();
-                return super.dispatchKeyEvent(event);
+                return true; // consume supaya tidak bocor ke WebView
             }
+
             if (uc != 0) lastKeystroke = now;
         }
         return super.dispatchKeyEvent(event);
     }
 
     private void scheduleScanFinalize() {
-        if (scanTimeoutRunnable != null) scanHandler.removeCallbacks(scanTimeoutRunnable);
-        scanTimeoutRunnable = this::runFinalizeNow;
-        scanHandler.postDelayed(scanTimeoutRunnable, SCAN_FINALIZE_TIMEOUT_MS);
+        scanHandler.removeCallbacks(scanFinalizeTask);
+        scanHandler.postDelayed(scanFinalizeTask, SCAN_FINALIZE_TIMEOUT_MS);
     }
     private void runFinalizeNow() {
-        if (scanTimeoutRunnable != null) scanHandler.removeCallbacks(scanTimeoutRunnable);
+        scanHandler.removeCallbacks(scanFinalizeTask);
         if (scanBuffer.length() == 0) return;
         String code = scanBuffer.toString();
         scanBuffer.setLength(0);
-        handleScannedCode(code);
+
+        // Bersihkan & finalize
+        String cleaned = code.replaceAll("\\p{Cntrl}", "");
+        String finalCode = cleaned.isEmpty() ? code : cleaned;
+
+        // De-dupe vs broadcast
+        long now = System.currentTimeMillis();
+        if (isDuplicateScan(finalCode, now)) return;
+        lastScanCode = finalCode;
+        lastScanTs = now;
+
+        handleScannedCode(finalCode);
+    }
+
+    private boolean isDuplicateScan(String code, long now) {
+        return code != null && code.equals(lastScanCode) && (now - lastScanTs) <= 400;
     }
 
     // ============== SCANNER (Broadcast) ==============
     private void buildScanBroadcast() {
         scanFilter = new IntentFilter();
+
         // Sunmi
         scanFilter.addAction("com.sunmi.scanner.ACTION_DATA_CODE_RECEIVED");
         scanFilter.addAction("com.sunmi.peripheral.scanner.ACTION_DATA_CODE_RECEIVED");
         scanFilter.addAction("com.sunmi.scanner.ACTION_SCAN_SUCCESS");
-        // Newland
+
+        // Newland / OEM
         scanFilter.addAction("nlscan.action.SCANNER_RESULT");
+
         // Zebra DataWedge
         scanFilter.addAction("com.symbol.datawedge.data");
         scanFilter.addAction("com.symbol.datawedge.api.RESULT_ACTION");
-        // Generic
-        scanFilter.addAction("android.intent.ACTION_DECODE_DATA");
+
+        // Generic / OEM lain
+        scanFilter.addAction("android.intent.action.DECODE_DATA");          // ← perbaikan (case benar)
+        scanFilter.addAction("android.intent.action.SCANRESULT");
+        scanFilter.addAction("com.android.server.scannerservice.broadcast");
+        scanFilter.addAction("com.qs.scanner.SCAN");
 
         scanReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context ctx, Intent i) {
-                if (!scannerActive) return;
+                if (primary == null || !scannerActive) return;
+
+                // Debug extras (boleh dimatikan kalau sudah stabil)
+                try {
+                    if (i != null && i.getExtras()!=null) {
+                        for (String k : i.getExtras().keySet()) {
+                            Log.d("SCANDBG","act="+i.getAction()+" extra "+k+"="+i.getExtras().get(k));
+                        }
+                    } else {
+                        Log.d("SCANDBG","act="+(i==null?null:i.getAction())+" (no extras)");
+                    }
+                } catch (Exception ignore){}
+
                 String code = extractBarcodeFromIntent(i);
-                if (code != null && !code.isEmpty()) handleScannedCode(code);
+                if (code == null) return;
+                code = code.replaceAll("\\p{Cntrl}", "");
+                if (code.isEmpty()) return;
+
+                long now = System.currentTimeMillis();
+                if (isDuplicateScan(code, now)) return; // de-dupe HID vs broadcast
+                lastScanCode = code;
+                lastScanTs = now;
+
+                handleScannedCode(code);
             }
         };
     }
 
+    private static final String[] EXTRA_STRING_KEYS = new String[]{
+            // umum
+            "data","text",Intent.EXTRA_TEXT,"value","scanvalue",
+            // Sunmi
+            "barcode_string",
+            // Newland/ALPS
+            "SCAN_BARCODE1","barcode","barocode",
+            // variasi lain
+            "scannerdata","scan_data","scan_code","code",
+            // Zebra
+            "com.symbol.datawedge.data_string"
+    };
+
     private String extractBarcodeFromIntent(Intent i) {
         if (i == null) return null;
-        String s;
-        if ((s = i.getStringExtra("data")) != null) return s;                                // Sunmi
-        if ((s = i.getStringExtra("barcode_string")) != null) return s;
-        if ((s = i.getStringExtra("barcode")) != null) return s;
-        if ((s = i.getStringExtra("com.symbol.datawedge.data_string")) != null) return s;   // Zebra
-        if ((s = i.getStringExtra("SCAN_BARCODE1")) != null) return s;                      // Newland
-        if ((s = i.getStringExtra("text")) != null) return s;
-        if ((s = i.getStringExtra(Intent.EXTRA_TEXT)) != null) return s;
-        byte[] b = i.getByteArrayExtra("dataBytes");                                        // Sunmi variant
-        if (b != null) try { return new String(b, "UTF-8"); } catch (Exception ignored) {}
+
+        // 1) string langsung
+        for (String k : EXTRA_STRING_KEYS) {
+            String v = i.getStringExtra(k);
+            if (v != null && !(v=v.trim()).isEmpty()) return v;
+        }
+
+        // 2) DataWedge: ArrayList<byte[]> di "decode_data"
+        try {
+            Object blob = i.getExtras() == null ? null : i.getExtras().get("com.symbol.datawedge.decode_data");
+            if (blob instanceof java.util.ArrayList) {
+                java.util.ArrayList<?> arr = (java.util.ArrayList<?>) blob;
+                if (!arr.isEmpty() && arr.get(0) instanceof byte[]) {
+                    return new String((byte[]) arr.get(0), java.nio.charset.StandardCharsets.UTF_8).trim();
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // 3) variasi byte[] vendor
+        try {
+            byte[] b;
+            if ((b = i.getByteArrayExtra("dataBytes")) != null) return new String(b, java.nio.charset.StandardCharsets.UTF_8).trim();
+            if ((b = i.getByteArrayExtra("barocode_bytes")) != null) return new String(b, java.nio.charset.StandardCharsets.UTF_8).trim();
+            if ((b = i.getByteArrayExtra("barcodeBytes")) != null) return new String(b, java.nio.charset.StandardCharsets.UTF_8).trim();
+        } catch (Exception ignored) {}
+
         return null;
     }
 
     private void handleScannedCode(String code) {
-        String esc = code.replace("\\", "\\\\").replace("'", "\\'");
+        if (code == null) return;
+        String clean = code.replaceAll("\\p{Cntrl}", "");
+        String esc = clean.replace("\\","\\\\").replace("'","\\'");
         String js =
                 "(function(b){try{"
                         + "console.log('Inject barcode:', b);"
-                        + "try{"
-                        + "  var input=document.getElementById('input_barcode_mobile');"
-                        + "  var btn=document.getElementById('procces_barcode_mobile');"
-                        + "  if(input){"
-                        + "    input.focus();"
-                        + "    input.value=b;"
-                        + "    input.dispatchEvent(new Event('input',{bubbles:true}));"
-                        + "    input.dispatchEvent(new Event('change',{bubbles:true}));"
-                        + "  }"
-                        + "  if(btn){"
-                        + "    btn.click();"
-                        + "  }"
-                        + "}catch(e){console.log('fallback-scan-error',e)}"
+                        + "const type=(el,txt)=>{el.focus();el.value='';el.dispatchEvent(new Event('input',{bubbles:true}));"
+                        + "for(const ch of txt){el.value+=ch;el.dispatchEvent(new Event('input',{bubbles:true}));}};"
+                        + "const clickById=(id)=>{const x=document.getElementById(id);if(x){x.click();return true}return false};"
+                        + "var input=document.getElementById('input_barcode_mobile')||document.querySelector('input[type=search],input[type=tel],input[type=number],input[type=text]');"
+                        + "if(input){type(input,b);clickById('procces_barcode_mobile');}"
+                        + "else{const fire=(t,o)=>document.dispatchEvent(new KeyboardEvent(t,Object.assign({bubbles:true,cancelable:true},o||{})));"
+                        + "for(const ch of b){const k=String(ch);fire('keydown',{key:k});fire('keypress',{key:k});fire('keyup',{key:k});}"
+                        + "fire('keydown',{key:'Enter',code:'Enter'});fire('keyup',{key:'Enter',code:'Enter'});}"
                         + "}catch(e){console.log('androidScan-error',e)}})('"+esc+"');";
         if (primary != null) primary.evaluateJavascript(js, null);
     }
 
-    @Override protected void onResume() {
-        super.onResume();
+    // ============== Lifecycle (register receiver) ==============
+    @Override protected void onStart() {
+        super.onStart();
         if (primary != null) { primary.requestFocus(); primary.requestFocusFromTouch(); }
         if (scanReceiver != null) {
             try {
@@ -572,9 +584,10 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception ignored) {}
         }
     }
-    @Override protected void onPause() {
+    @Override protected void onStop() {
         try { if (scanReceiver != null) unregisterReceiver(scanReceiver); } catch (Exception ignored) {}
-        super.onPause();
+        scanHandler.removeCallbacksAndMessages(null); // bersihkan debounce yang tertunda
+        super.onStop();
     }
 
     // ============== FILE CHOOSER ==============
@@ -599,7 +612,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private File createImageFile() throws IOException {
+    private File createImageFile() throws java.io.IOException {
         String imageFileName = "img_tmp_";
         File storageDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES);
         return File.createTempFile(imageFileName, ".jpg", storageDir);
@@ -609,7 +622,7 @@ public class MainActivity extends AppCompatActivity {
     private void doPhotoPrint(Bitmap bitmap) {
         try {
             PrintHelper ph = new PrintHelper(this);
-            ph.setScaleMode(PrintHelper.SCALE_MODE_FIT);           // penting: jangan FILL (bisa crop)
+            ph.setScaleMode(PrintHelper.SCALE_MODE_FIT);
             ph.setColorMode(PrintHelper.COLOR_MODE_MONOCHROME);
             ph.setOrientation(PrintHelper.ORIENTATION_PORTRAIT);
             ph.printBitmap("receipt.jpg - print", bitmap);
@@ -652,9 +665,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void doDirectPrint(Bitmap source){
-        // siapkan bitmap agar sesuai lebar printer & aman saat cut
         Bitmap bitmap = prepareForThermal(source, PRINTER_MAX_WIDTH_DOTS, SAFE_BOTTOM_PAD_DOTS);
-
         Pointer h = openPort();
         if (h != Pointer.NULL) {
             try {
@@ -720,7 +731,6 @@ public class MainActivity extends AppCompatActivity {
                 Bitmap decodedImage = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
                 if (decodedImage == null) { Toast.makeText(MainActivity.this, "Gagal decode gambar.", Toast.LENGTH_SHORT).show(); return; }
 
-                // selalu siapkan bitmap agar tidak kepotong
                 Bitmap ready = prepareForThermal(decodedImage, PRINTER_MAX_WIDTH_DOTS, SAFE_BOTTOM_PAD_DOTS);
 
                 if ("True".equalsIgnoreCase(is_mobile)) {
@@ -761,7 +771,7 @@ public class MainActivity extends AppCompatActivity {
                     if (c.getRequestProperty("Content-Type") == null)
                         c.setRequestProperty("Content-Type", "application/json");
 
-                    byte[] bytes = body == null ? new byte[0] : body.getBytes("UTF-8");
+                    byte[] bytes = body == null ? new byte[0] : body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
                     OutputStream os = c.getOutputStream();
                     os.write(bytes); os.flush(); os.close();
 
@@ -798,6 +808,5 @@ public class MainActivity extends AppCompatActivity {
         return "\""+q+"\"";
     }
 
-    // ============== Util ==============
     private int dp(int v) { return (int) (getResources().getDisplayMetrics().density * v); }
 }
