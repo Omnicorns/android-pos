@@ -553,22 +553,80 @@ public class MainActivity extends AppCompatActivity {
 
     private void handleScannedCode(String code) {
         if (code == null) return;
+
+        // buang karakter kontrol dan escape supaya aman di JS
         String clean = code.replaceAll("\\p{Cntrl}", "");
-        String esc = clean.replace("\\","\\\\").replace("'","\\'");
+        String esc = clean.replace("\\", "\\\\").replace("'", "\\'");
+
         String js =
                 "(function(b){try{"
                         + "console.log('Inject barcode:', b);"
-                        + "const type=(el,txt)=>{el.focus();el.value='';el.dispatchEvent(new Event('input',{bubbles:true}));"
-                        + "for(const ch of txt){el.value+=ch;el.dispatchEvent(new Event('input',{bubbles:true}));}};"
-                        + "const clickById=(id)=>{const x=document.getElementById(id);if(x){x.click();return true}return false};"
-                        + "var input=document.getElementById('input_barcode_mobile')||document.querySelector('input[type=search],input[type=tel],input[type=number],input[type=text]');"
-                        + "if(input){type(input,b);clickById('procces_barcode_mobile');}"
-                        + "else{const fire=(t,o)=>document.dispatchEvent(new KeyboardEvent(t,Object.assign({bubbles:true,cancelable:true},o||{})));"
-                        + "for(const ch of b){const k=String(ch);fire('keydown',{key:k});fire('keypress',{key:k});fire('keyup',{key:k});}"
-                        + "fire('keydown',{key:'Enter',code:'Enter'});fire('keyup',{key:'Enter',code:'Enter'});}"
+
+                        // ==== PLAN A: cari input yang relevan ====
+                        + "var findBox=function(){"
+                        + "  var c=document.querySelectorAll('input,textarea');"
+                        + "  for(var i=0;i<c.length;i++){var el=c[i];"
+                        + "    var ph=(el.getAttribute('placeholder')||'')+'';"
+                        + "    var ar=(el.getAttribute('aria-label')||'')+'';"
+                        + "    var cn=(el.className||'')+'';"
+                        + "    if(/search|cari|barcode|scan/i.test(ph+ar+cn) && el.offsetParent!==null){"
+                        + "      return el;"
+                        + "    }"
+                        + "  }"
+                        + "  return null;"
+                        + "};"
+                        + "var box=findBox();"
+                        + "if(box){"
+                        + "  box.focus();"
+                        + "  box.value=b;"
+                        + "  box.dispatchEvent(new Event('input',{bubbles:true}));"
+                        + "  var e1=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',bubbles:true});"
+                        + "  var e2=new KeyboardEvent('keyup',{key:'Enter',code:'Enter',bubbles:true});"
+                        + "  document.dispatchEvent(e1);"
+                        + "  document.dispatchEvent(e2);"
+                        + "  try {"
+                        + "    document.getElementsByClassName('button proces_search')[0].click();"
+                        + "  } catch(e) {"
+                        + "    console.log('Tombol proces_search tidak ditemukan:', e);"
+                        + "  }"
+                        + "}else{"
+
+                        // ==== PLAN B: fallback generic ====
+                        + "  const type=(el,txt)=>{"
+                        + "    el.focus();"
+                        + "    el.value='';"
+                        + "    el.dispatchEvent(new Event('input',{bubbles:true}));"
+                        + "    for(const ch of txt){"
+                        + "      el.value+=ch;"
+                        + "      el.dispatchEvent(new Event('input',{bubbles:true}));"
+                        + "    }"
+                        + "  };"
+                        + "  const clickById=(id)=>{"
+                        + "    const x=document.getElementById(id);"
+                        + "    if(x){x.click();return true}return false;"
+                        + "  };"
+                        + "  var input=document.getElementById('input_barcode_mobile')"
+                        + "           ||document.querySelector('input[type=search],input[type=tel],input[type=number],input[type=text]');"
+                        + "  if(input){"
+                        + "    type(input,b);"
+                        + "    clickById('procces_barcode_mobile');"
+                        + "  }else{"
+                        + "    const fire=(t,o)=>document.dispatchEvent(new KeyboardEvent(t,Object.assign({bubbles:true,cancelable:true},o||{})));"
+                        + "    for(const ch of b){"
+                        + "      const k=String(ch);"
+                        + "      fire('keydown',{key:k});"
+                        + "      fire('keypress',{key:k});"
+                        + "      fire('keyup',{key:k});"
+                        + "    }"
+                        + "    fire('keydown',{key:'Enter',code:'Enter'});"
+                        + "    fire('keyup',{key:'Enter',code:'Enter'});"
+                        + "  }"
+                        + "}"
                         + "}catch(e){console.log('androidScan-error',e)}})('"+esc+"');";
+
         if (primary != null) primary.evaluateJavascript(js, null);
     }
+
 
     // ============== Lifecycle (register receiver) ==============
     @Override protected void onStart() {
