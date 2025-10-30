@@ -71,16 +71,16 @@ import java.util.Map;
 public class MainActivity extends AppCompatActivity {
 
     // ============== KONFIG ==============
-    private static final String HOST = "dev.sarinahportal.co.id";   // tanpa https://
+    private static final String HOST = "stagging.sarinahportal.co.id";   // tanpa https://
     private static final boolean DEV_MODE = true;
     private static final boolean DEV_ALLOW_MIXED = true;            // ijinkan http (dev)
     private static final boolean DEV_ACCEPT_3P_COOKIES = true;      // third-party cookies (dev)
     private static final boolean DEV_VERBOSE_JS_LOG = true;
 
-    private static final String[] DEV_SUFFIXES = { "dev.sarinahportal.co.id" };
+    private static final String[] DEV_SUFFIXES = { "stagging.sarinahportal.co.id" };
 
     private String initialPosUrl() {
-        return "https://" + HOST + "/web#action=426&model=pos.config&view_type=kanban&cids=1&bids=false&menu_id=270";
+        return "http://" + HOST + "/web#action=426&model=pos.config&view_type=kanban&cids=1&bids=false&menu_id=270";
     }
 
     // ==== CETAK: lebar printer (576=80mm, 384=58mm) + padding aman ====

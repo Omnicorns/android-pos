@@ -24,7 +24,7 @@ import java.net.URL;
 public class SecondaryDisplay extends Presentation {
 
     public WebView myWebView;
-    String domain = "https://dev.sarinahportal.co.id/";
+    String domain = "http://stagging.sarinahportal.co.id/";
 //    String domain = "http://sarinahportal.co.id:8070/";
     CookieSyncManager cookieSyncManager;
     CookieManager cookieManager;
@@ -41,7 +41,7 @@ public class SecondaryDisplay extends Presentation {
 
         myWebView = (WebView)findViewById(R.id.myWebview2);
         iV = (ImageView) findViewById(R.id.imageView);
-        String imgURL  = "https://dev.sarinahportal.co.id/web/image/3632";
+        String imgURL  = "http://stagging.sarinahportal.co.id/web/image/3632";
         new DownLoadImageTask(iV).execute(imgURL);
 
         WebSettings webSettings = myWebView.getSettings();
@@ -67,7 +67,7 @@ public class SecondaryDisplay extends Presentation {
         iV.setVisibility(View.GONE);
         cookieManager.setCookie(
                 domain,
-                "session_id = "+session+"  ; Domain=dev.sarinahportal.co.id"
+                "session_id = "+session+"  ; Domain=stagging.sarinahportal.co.id"
         );
         cookieSyncManager.sync();
         myWebView.loadUrl(domain + "web/customer_display");
