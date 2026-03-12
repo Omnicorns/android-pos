@@ -412,15 +412,14 @@ public class MainActivity extends AppCompatActivity {
                 return true; // consume enter dari scanner
             }
 
-            int uc = event.getUnicodeChar();
-            boolean hasModifier = event.isShiftPressed() || event.isAltPressed() || event.isCtrlPressed() || event.isMetaPressed();
+            int uc = event.getUnicodeChar(event.getMetaState());
+            boolean isControlCombo = event.isAltPressed() || event.isCtrlPressed() || event.isMetaPressed();
 
-            // **Perbaikan utama**: tangkap KARAKTER PERTAMA juga (mulai buffer)
-            if (uc != 0 && !hasModifier) {
+            if (uc != 0 && !isControlCombo) {
                 scanBuffer.append((char) uc);
                 lastKeystroke = now;
                 scheduleScanFinalize();
-                return true; // consume supaya tidak bocor ke WebView
+                return true;
             }
 
             if (uc != 0) lastKeystroke = now;
@@ -580,10 +579,12 @@ public class MainActivity extends AppCompatActivity {
                         + "  box.focus();"
                         + "  box.value=b;"
                         + "  box.dispatchEvent(new Event('input',{bubbles:true}));"
-                        + "  var e1=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',bubbles:true});"
-                        + "  var e2=new KeyboardEvent('keyup',{key:'Enter',code:'Enter',bubbles:true});"
-                        + "  document.dispatchEvent(e1);"
-                        + "  document.dispatchEvent(e2);"
+                        + "  var e1=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true});"
+                        + "  var e2=new KeyboardEvent('keypress',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true});"
+                        + "  var e3=new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true});"
+                        + "  box.dispatchEvent(e1);"
+                        + "  box.dispatchEvent(e2);"
+                        + "  box.dispatchEvent(e3);"
                         + "  try {"
                         + "    document.getElementsByClassName('button proces_search')[0].click();"
                         + "  } catch(e) {"
