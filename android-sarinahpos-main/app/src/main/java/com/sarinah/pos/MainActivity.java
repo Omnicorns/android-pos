@@ -56,8 +56,6 @@ import com.sun.jna.ptr.LongByReference;
 
 import org.json.JSONObject;
 
-import java.io.BufferedInputStream;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
@@ -65,8 +63,6 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.Calendar;
-import java.util.HashMap;
-import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -98,19 +94,16 @@ public class MainActivity extends AppCompatActivity {
     private WebView primary;
 
     // ============== SCAN STATE ==============
-    // Gunakan flag untuk aktifkan HID/broadcast HANYA di halaman POS
     private volatile boolean scannerActive = false;
 
     // ============== SCAN (HID) ==============
-    // Perbaikan utama: capture karakter PERTAMA, debounce lebih longgar, dan CONSUME event saat burst
     private final StringBuilder scanBuffer = new StringBuilder();
     private long lastKeystroke = 0L;
     private final Handler scanHandler = new Handler(Looper.getMainLooper());
     private final Runnable scanFinalizeTask = this::runFinalizeNow;
 
-    // Lebihkan toleransi default supaya tidak cepat finalize di tengah scan
-    private static final int SCAN_BURST_GAP_MS = 35;         // antar key (HID)
-    private static final int SCAN_FINALIZE_TIMEOUT_MS = 150; // idle sebelum finalize
+    private static final int SCAN_BURST_GAP_MS = 35;
+    private static final int SCAN_FINALIZE_TIMEOUT_MS = 150;
 
     // De-dupe antar sumber (HID vs Broadcast)
     private volatile long lastScanTs = 0L;
@@ -249,7 +242,6 @@ public class MainActivity extends AppCompatActivity {
         wv.setVerticalScrollBarEnabled(true);
         wv.setHorizontalScrollBarEnabled(false);
 
-        // JS bridge (print + anti-CORS)
         wv.addJavascriptInterface(new WebAppInterface(), "Android");
 
         wv.setWebChromeClient(new WebChromeClient() {
@@ -323,7 +315,6 @@ public class MainActivity extends AppCompatActivity {
                 super.onPageFinished(view, url);
                 showOffline(false); statusView.setText("Online"); progressBar.setVisibility(View.GONE);
                 view.requestFocus(); view.requestFocusFromTouch();
-                // Aktifkan scanner hanya di halaman POS (biar tidak “nembak” di tempat lain)
                 scannerActive = (url != null && url.contains("/pos/web"));
             }
         });
@@ -386,16 +377,14 @@ public class MainActivity extends AppCompatActivity {
         new Handler(Looper.getMainLooper()).postDelayed(() -> System.exit(0), 150);
     }
 
-    // ============== SCANNER (HID) ==============
+    // ============== SCANNER (HID) — FIX: preserve lowercase dari barcode ==============
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        // Proses HID hanya saat halaman POS aktif
         if (!scannerActive) return super.dispatchKeyEvent(event);
 
         if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
             int keyCode = event.getKeyCode();
 
-            // Abaikan modifier
             if (keyCode == KeyEvent.KEYCODE_SHIFT_LEFT || keyCode == KeyEvent.KEYCODE_SHIFT_RIGHT
                     || keyCode == KeyEvent.KEYCODE_ALT_LEFT || keyCode == KeyEvent.KEYCODE_ALT_RIGHT
                     || keyCode == KeyEvent.KEYCODE_CTRL_LEFT || keyCode == KeyEvent.KEYCODE_CTRL_RIGHT
@@ -404,16 +393,33 @@ public class MainActivity extends AppCompatActivity {
             }
 
             long now = System.currentTimeMillis();
-            boolean burst = (now - lastKeystroke) <= SCAN_BURST_GAP_MS;
+            boolean burst = (scanBuffer.length() > 0) && (now - lastKeystroke) <= SCAN_BURST_GAP_MS;
+            boolean isFirstChar = scanBuffer.length() == 0;
 
-            // ENTER mengakhiri burst
             if (keyCode == KeyEvent.KEYCODE_ENTER) {
+                Log.d("SCAN_HID", "ENTER → buffer: [" + scanBuffer.toString() + "]");
                 if (scanBuffer.length() > 0) runFinalizeNow();
-                return true; // consume enter dari scanner
+                return true;
             }
 
-            int uc = event.getUnicodeChar(event.getMetaState());
+            int ucWithMeta = event.getUnicodeChar(event.getMetaState());
+            int ucRaw      = event.getUnicodeChar(0);
+
+            Log.d("SCAN_HID", "keyCode=" + keyCode
+                    + " ucMeta=" + ucWithMeta + "[" + (ucWithMeta != 0 ? String.valueOf((char) ucWithMeta) : "?") + "]"
+                    + " ucRaw=" + ucRaw + "[" + (ucRaw != 0 ? String.valueOf((char) ucRaw) : "?") + "]"
+                    + " shift=" + event.isShiftPressed()
+                    + " burst=" + burst
+                    + " first=" + isFirstChar);
+
             boolean isControlCombo = event.isAltPressed() || event.isCtrlPressed() || event.isMetaPressed();
+
+            int uc;
+            if ((burst || isFirstChar) && event.isShiftPressed() && ucRaw != 0 && ucRaw != ucWithMeta) {
+                uc = ucRaw;
+            } else {
+                uc = ucWithMeta;
+            }
 
             if (uc != 0 && !isControlCombo) {
                 scanBuffer.append((char) uc);
@@ -437,11 +443,9 @@ public class MainActivity extends AppCompatActivity {
         String code = scanBuffer.toString();
         scanBuffer.setLength(0);
 
-        // Bersihkan & finalize
         String cleaned = code.replaceAll("\\p{Cntrl}", "");
         String finalCode = cleaned.isEmpty() ? code : cleaned;
 
-        // De-dupe vs broadcast
         long now = System.currentTimeMillis();
         if (isDuplicateScan(finalCode, now)) return;
         lastScanCode = finalCode;
@@ -458,20 +462,13 @@ public class MainActivity extends AppCompatActivity {
     private void buildScanBroadcast() {
         scanFilter = new IntentFilter();
 
-        // Sunmi
         scanFilter.addAction("com.sunmi.scanner.ACTION_DATA_CODE_RECEIVED");
         scanFilter.addAction("com.sunmi.peripheral.scanner.ACTION_DATA_CODE_RECEIVED");
         scanFilter.addAction("com.sunmi.scanner.ACTION_SCAN_SUCCESS");
-
-        // Newland / OEM
         scanFilter.addAction("nlscan.action.SCANNER_RESULT");
-
-        // Zebra DataWedge
         scanFilter.addAction("com.symbol.datawedge.data");
         scanFilter.addAction("com.symbol.datawedge.api.RESULT_ACTION");
-
-        // Generic / OEM lain
-        scanFilter.addAction("android.intent.action.DECODE_DATA");          // ← perbaikan (case benar)
+        scanFilter.addAction("android.intent.action.DECODE_DATA");
         scanFilter.addAction("android.intent.action.SCANRESULT");
         scanFilter.addAction("com.android.server.scannerservice.broadcast");
         scanFilter.addAction("com.qs.scanner.SCAN");
@@ -480,7 +477,6 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onReceive(Context ctx, Intent i) {
                 if (primary == null || !scannerActive) return;
 
-                // Debug extras (boleh dimatikan kalau sudah stabil)
                 try {
                     if (i != null && i.getExtras()!=null) {
                         for (String k : i.getExtras().keySet()) {
@@ -497,7 +493,7 @@ public class MainActivity extends AppCompatActivity {
                 if (code.isEmpty()) return;
 
                 long now = System.currentTimeMillis();
-                if (isDuplicateScan(code, now)) return; // de-dupe HID vs broadcast
+                if (isDuplicateScan(code, now)) return;
                 lastScanCode = code;
                 lastScanTs = now;
 
@@ -507,28 +503,21 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private static final String[] EXTRA_STRING_KEYS = new String[]{
-            // umum
             "data","text",Intent.EXTRA_TEXT,"value","scanvalue",
-            // Sunmi
             "barcode_string",
-            // Newland/ALPS
             "SCAN_BARCODE1","barcode","barocode",
-            // variasi lain
             "scannerdata","scan_data","scan_code","code",
-            // Zebra
             "com.symbol.datawedge.data_string"
     };
 
     private String extractBarcodeFromIntent(Intent i) {
         if (i == null) return null;
 
-        // 1) string langsung
         for (String k : EXTRA_STRING_KEYS) {
             String v = i.getStringExtra(k);
             if (v != null && !(v=v.trim()).isEmpty()) return v;
         }
 
-        // 2) DataWedge: ArrayList<byte[]> di "decode_data"
         try {
             Object blob = i.getExtras() == null ? null : i.getExtras().get("com.symbol.datawedge.decode_data");
             if (blob instanceof java.util.ArrayList) {
@@ -539,7 +528,6 @@ public class MainActivity extends AppCompatActivity {
             }
         } catch (Exception ignored) {}
 
-        // 3) variasi byte[] vendor
         try {
             byte[] b;
             if ((b = i.getByteArrayExtra("dataBytes")) != null) return new String(b, java.nio.charset.StandardCharsets.UTF_8).trim();
@@ -550,10 +538,14 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
+    // ============== HANDLE SCANNED CODE ==============
+    // FIX: Kirim barcode ORIGINAL ke JS
+    // - Di popup/modal: isi original (huruf kecil tetap kecil)
+    // - Di product search: toUpperCase() di JS supaya cocok database Odoo
     private void handleScannedCode(String code) {
         if (code == null) return;
 
-        // buang karakter kontrol dan escape supaya aman di JS
+        // Kirim original, TIDAK toUpperCase() di sini
         String clean = code.replaceAll("\\p{Cntrl}", "");
         String esc = clean.replace("\\", "\\\\").replace("'", "\\'");
 
@@ -561,35 +553,67 @@ public class MainActivity extends AppCompatActivity {
                 "(function(b){try{"
                         + "console.log('Inject barcode:', b);"
 
-                        // ==== PLAN A: cari input yang relevan ====
+                        // ==== PLAN A: Cek popup/modal dulu ====
                         + "var findBox=function(){"
+
+                        // 1) Cari input di dalam popup/modal yang sedang terbuka
+                        + "  var popups=document.querySelectorAll('.modal,.popup,.modal-dialog,.popup-input,[class*=popup],[class*=modal]');"
+                        + "  for(var p=0;p<popups.length;p++){"
+                        + "    if(popups[p].offsetParent===null && popups[p].style.display==='none') continue;"
+                        + "    var inputs=popups[p].querySelectorAll('input,textarea');"
+                        + "    for(var j=0;j<inputs.length;j++){"
+                        + "      if(inputs[j].offsetParent!==null && inputs[j].type!=='hidden') return {el:inputs[j], isPopup:true};"
+                        + "    }"
+                        + "  }"
+
+                        // 2) Cari input yang sedang focused
+                        + "  var focused=document.activeElement;"
+                        + "  if(focused && (focused.tagName==='INPUT'||focused.tagName==='TEXTAREA') && focused.type!=='hidden' && focused.offsetParent!==null){"
+                        + "    return {el:focused, isPopup:true};"
+                        + "  }"
+
+                        // 3) Fallback: cari input search/barcode biasa (halaman POS utama)
                         + "  var c=document.querySelectorAll('input,textarea');"
                         + "  for(var i=0;i<c.length;i++){var el=c[i];"
                         + "    var ph=(el.getAttribute('placeholder')||'')+'';"
                         + "    var ar=(el.getAttribute('aria-label')||'')+'';"
                         + "    var cn=(el.className||'')+'';"
                         + "    if(/search|cari|barcode|scan/i.test(ph+ar+cn) && el.offsetParent!==null){"
-                        + "      return el;"
+                        + "      return {el:el, isPopup:false};"
                         + "    }"
                         + "  }"
                         + "  return null;"
                         + "};"
-                        + "var box=findBox();"
-                        + "if(box){"
+
+                        + "var result=findBox();"
+                        + "if(result){"
+                        + "  var box=result.el;"
                         + "  box.focus();"
-                        + "  box.value=b;"
-                        + "  box.dispatchEvent(new Event('input',{bubbles:true}));"
-                        + "  var e1=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true});"
-                        + "  var e2=new KeyboardEvent('keypress',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true});"
-                        + "  var e3=new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true});"
-                        + "  box.dispatchEvent(e1);"
-                        + "  box.dispatchEvent(e2);"
-                        + "  box.dispatchEvent(e3);"
-                        + "  try {"
-                        + "    document.getElementsByClassName('button proces_search')[0].click();"
-                        + "  } catch(e) {"
-                        + "    console.log('Tombol proces_search tidak ditemukan:', e);"
+
+                        // Jika BUKAN popup → product search → uppercase supaya cocok DB Odoo
+                        + "  if(!result.isPopup){"
+                        + "    box.value=b.toUpperCase();"
+                        + "    box.dispatchEvent(new Event('input',{bubbles:true}));"
+                        + "    box.dispatchEvent(new Event('change',{bubbles:true}));"
+                        + "    var e1=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true});"
+                        + "    var e2=new KeyboardEvent('keypress',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true});"
+                        + "    var e3=new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true});"
+                        + "    box.dispatchEvent(e1);"
+                        + "    box.dispatchEvent(e2);"
+                        + "    box.dispatchEvent(e3);"
+                        + "    try {"
+                        + "      document.getElementsByClassName('button proces_search')[0].click();"
+                        + "    } catch(e) {"
+                        + "      console.log('Tombol proces_search tidak ditemukan:', e);"
+                        + "    }"
+                        + "  } else {"
+                        // Di popup: isi ORIGINAL (huruf kecil tetap kecil), TIDAK auto-submit
+                        + "    box.value=b;"
+                        + "    box.dispatchEvent(new Event('input',{bubbles:true}));"
+                        + "    box.dispatchEvent(new Event('change',{bubbles:true}));"
+                        + "    console.log('Barcode diisi ke popup input (original):', b);"
                         + "  }"
+
                         + "}else{"
 
                         // ==== PLAN B: fallback generic ====
@@ -609,11 +633,12 @@ public class MainActivity extends AppCompatActivity {
                         + "  var input=document.getElementById('input_barcode_mobile')"
                         + "           ||document.querySelector('input[type=search],input[type=tel],input[type=number],input[type=text]');"
                         + "  if(input){"
-                        + "    type(input,b);"
+                        + "    type(input,b.toUpperCase());"
                         + "    clickById('procces_barcode_mobile');"
                         + "  }else{"
                         + "    const fire=(t,o)=>document.dispatchEvent(new KeyboardEvent(t,Object.assign({bubbles:true,cancelable:true},o||{})));"
-                        + "    for(const ch of b){"
+                        + "    var upper=b.toUpperCase();"
+                        + "    for(const ch of upper){"
                         + "      const k=String(ch);"
                         + "      fire('keydown',{key:k});"
                         + "      fire('keypress',{key:k});"
@@ -645,7 +670,7 @@ public class MainActivity extends AppCompatActivity {
     }
     @Override protected void onStop() {
         try { if (scanReceiver != null) unregisterReceiver(scanReceiver); } catch (Exception ignored) {}
-        scanHandler.removeCallbacksAndMessages(null); // bersihkan debounce yang tertunda
+        scanHandler.removeCallbacksAndMessages(null);
         super.onStop();
     }
 
@@ -752,7 +777,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ==== Util scale lama (biarkan tersedia) ====
+    // ==== Util scale ====
     public static Bitmap resizeImage(Bitmap bitmap, int w, int h) {
         int bitmapWidth = bitmap.getWidth(); int bitmapHeight = bitmap.getHeight();
         float scaleWidth = (float) w / bitmapWidth; float scaleHeight = (float) h / bitmapHeight;
@@ -805,7 +830,6 @@ public class MainActivity extends AppCompatActivity {
         }
         @JavascriptInterface public void kickDrawer() { doKickDrawer(); }
 
-        // ========= Anti-CORS: POST/PUT/DELETE via native =========
         @JavascriptInterface
         public void postJson(String url, String headersJson, String body) {
             new Thread(() -> {
