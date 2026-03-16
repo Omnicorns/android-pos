@@ -414,13 +414,13 @@ public class MainActivity extends AppCompatActivity {
 
             boolean isControlCombo = event.isAltPressed() || event.isCtrlPressed() || event.isMetaPressed();
 
-            int uc;
-            if ((burst || isFirstChar) && event.isShiftPressed() && ucRaw != 0 && ucRaw != ucWithMeta) {
-                uc = ucRaw;
-            } else {
-                uc = ucWithMeta;
-            }
-
+//            int uc;
+//            if ((burst || isFirstChar) && event.isShiftPressed() && ucRaw != 0 && ucRaw != ucWithMeta) {
+//                uc = ucRaw;
+//            } else {
+//                uc = ucWithMeta;
+//            }
+            int uc = (ucWithMeta != 0) ? ucWithMeta : ucRaw;
             if (uc != 0 && !isControlCombo) {
                 scanBuffer.append((char) uc);
                 lastKeystroke = now;
@@ -592,7 +592,8 @@ public class MainActivity extends AppCompatActivity {
 
                         // Jika BUKAN popup → product search → uppercase supaya cocok DB Odoo
                         + "  if(!result.isPopup){"
-                        + "    box.value=b.toUpperCase();"
+                        + "    var isOrderPage = /order|return/i.test(window.location.href + ' ' + document.title + ' ' + (box.getAttribute('placeholder')||''));"
+                        + "   box.value = isOrderPage ? b : b.toUpperCase();"
                         + "    box.dispatchEvent(new Event('input',{bubbles:true}));"
                         + "    box.dispatchEvent(new Event('change',{bubbles:true}));"
                         + "    var e1=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true});"
