@@ -12,6 +12,7 @@ import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
+import android.hardware.display.DisplayManager;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
@@ -22,6 +23,7 @@ import android.os.Looper;
 import android.provider.MediaStore;
 import android.util.Base64;
 import android.util.Log;
+import android.view.Display;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -93,6 +95,11 @@ public class MainActivity extends AppCompatActivity {
     private ProgressBar progressBar;
     private WebView primary;
 
+    // ============== DUAL DISPLAY ==============
+    private DisplayManager displayManager;
+    private CustomerDisplayPresentation customerDisplay;
+    private String configId = "";
+
     // ============== SCAN STATE ==============
     private volatile boolean scannerActive = false;
 
@@ -124,6 +131,7 @@ public class MainActivity extends AppCompatActivity {
         WebView.setWebContentsDebuggingEnabled(true);
         buildUi();
         buildScanBroadcast();
+        setupDualDisplay();
 
         primary = makeWebView();
         primaryContainer.addView(primary, new FrameLayout.LayoutParams(
@@ -214,6 +222,139 @@ public class MainActivity extends AppCompatActivity {
         lp.gravity = Gravity.CENTER;
         progressBar.setVisibility(View.GONE);
         root.addView(progressBar, lp);
+    }
+
+    // ============== DUAL DISPLAY ==============
+    private void setupDualDisplay() {
+        displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+
+        displayManager.registerDisplayListener(new DisplayManager.DisplayListener() {
+            @Override
+            public void onDisplayAdded(int displayId) {
+                Log.d("DUAL_DISPLAY", "Display added: " + displayId);
+                runOnUiThread(() -> tryShowCustomerDisplay());
+            }
+
+            @Override
+            public void onDisplayRemoved(int displayId) {
+                Log.d("DUAL_DISPLAY", "Display removed: " + displayId);
+                runOnUiThread(() -> dismissCustomerDisplay());
+            }
+
+            @Override
+            public void onDisplayChanged(int displayId) {
+                // biasanya tidak perlu action
+            }
+        }, new Handler(Looper.getMainLooper()));
+
+        // Cek apakah sudah ada secondary display saat startup
+        tryShowCustomerDisplay();
+    }
+
+    private void tryShowCustomerDisplay() {
+        Display[] displays = displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
+
+        if (displays.length > 0 && customerDisplay == null) {
+            Display secondaryDisplay = displays[0];
+            Log.d("DUAL_DISPLAY", "Found secondary display: " + secondaryDisplay.getName()
+                    + " (" + secondaryDisplay.getWidth() + "x" + secondaryDisplay.getHeight() + ")");
+
+            customerDisplay = new CustomerDisplayPresentation(this, secondaryDisplay, HOST, DEV_MODE);
+            try {
+                customerDisplay.show();
+                updateStatusDualBadge();
+                Log.d("DUAL_DISPLAY", "Customer display shown!");
+            } catch (Exception e) {
+                Log.e("DUAL_DISPLAY", "Failed to show customer display", e);
+                customerDisplay = null;
+            }
+        } else if (displays.length == 0) {
+            Log.d("DUAL_DISPLAY", "No secondary display found");
+        }
+    }
+
+    private void dismissCustomerDisplay() {
+        if (customerDisplay != null) {
+            try { customerDisplay.dismiss(); } catch (Exception ignored) {}
+            customerDisplay = null;
+            updateStatusDualBadge();
+        }
+    }
+
+    private void updateStatusDualBadge() {
+        String base = statusView.getText().toString().replace(" • Dual", "");
+        if (customerDisplay != null) {
+            statusView.setText(base + " • Dual");
+        } else {
+            statusView.setText(base);
+        }
+    }
+
+    /**
+     * Update customer display berdasarkan URL primary (mirip VB.NET Browser_AddressChanged).
+     * - Jika di halaman POS → tampilkan customer_display_new
+     * - Jika di halaman lain → tampilkan logo default
+     */
+    private void updateCustomerDisplay(String url) {
+        if (customerDisplay == null) return;
+
+        // Parse config_id dari URL
+        configId = "";
+        try {
+            if (url != null) {
+                Uri uri = Uri.parse(url);
+
+                // Cek query parameter
+                String cid = uri.getQueryParameter("config_id");
+                if (cid != null && !cid.isEmpty()) {
+                    configId = cid;
+                }
+
+                // Cek dari fragment (hash) — Odoo sering pakai #config_id=X
+                if (configId.isEmpty()) {
+                    String fragment = uri.getFragment();
+                    if (fragment != null) {
+                        // Ganti # jadi & untuk parsing
+                        String[] parts = fragment.replace("#", "&").split("&");
+                        for (String param : parts) {
+                            if (param.startsWith("config_id=")) {
+                                configId = param.substring("config_id=".length());
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Cek juga dari full URL string (fallback)
+                if (configId.isEmpty() && url.contains("config_id=")) {
+                    try {
+                        int idx = url.indexOf("config_id=") + "config_id=".length();
+                        StringBuilder sb = new StringBuilder();
+                        for (int i = idx; i < url.length(); i++) {
+                            char c = url.charAt(i);
+                            if (c == '&' || c == '#' || c == ' ') break;
+                            sb.append(c);
+                        }
+                        configId = sb.toString();
+                    } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception e) {
+            Log.e("DUAL_DISPLAY", "Error parsing config_id", e);
+            configId = "";
+        }
+
+        if (url != null && url.contains("/pos/web")) {
+            // POS aktif → tampilkan customer display
+            String custUrl = "https://" + HOST + "/web/customer_display_new/" + configId;
+            customerDisplay.loadUrl(custUrl);
+            Log.d("DUAL_DISPLAY", "Customer display → " + custUrl);
+        } else {
+            // Halaman lain → tampilkan logo/default image
+            String defaultUrl = "https://" + HOST + "/web/image/3632";
+            customerDisplay.loadUrl(defaultUrl);
+            Log.d("DUAL_DISPLAY", "Customer display → default logo");
+        }
     }
 
     // ============== WebView ==============
@@ -316,6 +457,10 @@ public class MainActivity extends AppCompatActivity {
                 showOffline(false); statusView.setText("Online"); progressBar.setVisibility(View.GONE);
                 view.requestFocus(); view.requestFocusFromTouch();
                 scannerActive = (url != null && url.contains("/pos/web"));
+
+                // === DUAL DISPLAY: update customer display ===
+                updateCustomerDisplay(url);
+                updateStatusDualBadge();
             }
         });
 
@@ -366,6 +511,9 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
     private void safeCleanupAndExit() {
+        // Dismiss customer display dulu
+        dismissCustomerDisplay();
+
         try {
             CookieManager cm = CookieManager.getInstance();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) cm.removeAllCookies(val -> {});
@@ -414,12 +562,6 @@ public class MainActivity extends AppCompatActivity {
 
             boolean isControlCombo = event.isAltPressed() || event.isCtrlPressed() || event.isMetaPressed();
 
-//            int uc;
-//            if ((burst || isFirstChar) && event.isShiftPressed() && ucRaw != 0 && ucRaw != ucWithMeta) {
-//                uc = ucRaw;
-//            } else {
-//                uc = ucWithMeta;
-//            }
             int uc = (ucWithMeta != 0) ? ucWithMeta : ucRaw;
             if (uc != 0 && !isControlCombo) {
                 scanBuffer.append((char) uc);
@@ -539,13 +681,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ============== HANDLE SCANNED CODE ==============
-    // FIX: Kirim barcode ORIGINAL ke JS
-    // - Di popup/modal: isi original (huruf kecil tetap kecil)
-    // - Di product search: toUpperCase() di JS supaya cocok database Odoo
     private void handleScannedCode(String code) {
         if (code == null) return;
 
-        // Kirim original, TIDAK toUpperCase() di sini
         String clean = code.replaceAll("\\p{Cntrl}", "");
         String esc = clean.replace("\\", "\\\\").replace("'", "\\'");
 
@@ -553,10 +691,8 @@ public class MainActivity extends AppCompatActivity {
                 "(function(b){try{"
                         + "console.log('Inject barcode:', b);"
 
-                        // ==== PLAN A: Cek popup/modal dulu ====
                         + "var findBox=function(){"
 
-                        // 1) Cari input di dalam popup/modal yang sedang terbuka
                         + "  var popups=document.querySelectorAll('.modal,.popup,.modal-dialog,.popup-input,[class*=popup],[class*=modal]');"
                         + "  for(var p=0;p<popups.length;p++){"
                         + "    if(popups[p].offsetParent===null && popups[p].style.display==='none') continue;"
@@ -566,13 +702,11 @@ public class MainActivity extends AppCompatActivity {
                         + "    }"
                         + "  }"
 
-                        // 2) Cari input yang sedang focused
                         + "  var focused=document.activeElement;"
                         + "  if(focused && (focused.tagName==='INPUT'||focused.tagName==='TEXTAREA') && focused.type!=='hidden' && focused.offsetParent!==null){"
                         + "    return {el:focused, isPopup:true};"
                         + "  }"
 
-                        // 3) Fallback: cari input search/barcode biasa (halaman POS utama)
                         + "  var c=document.querySelectorAll('input,textarea');"
                         + "  for(var i=0;i<c.length;i++){var el=c[i];"
                         + "    var ph=(el.getAttribute('placeholder')||'')+'';"
@@ -590,7 +724,6 @@ public class MainActivity extends AppCompatActivity {
                         + "  var box=result.el;"
                         + "  box.focus();"
 
-                        // Jika BUKAN popup → product search → uppercase supaya cocok DB Odoo
                         + "  if(!result.isPopup){"
                         + "    var isOrderPage = /order|return/i.test(window.location.href + ' ' + document.title + ' ' + (box.getAttribute('placeholder')||''));"
                         + "   box.value = isOrderPage ? b : b.toUpperCase();"
@@ -608,7 +741,6 @@ public class MainActivity extends AppCompatActivity {
                         + "      console.log('Tombol proces_search tidak ditemukan:', e);"
                         + "    }"
                         + "  } else {"
-                        // Di popup: isi ORIGINAL (huruf kecil tetap kecil), TIDAK auto-submit
                         + "    box.value=b;"
                         + "    box.dispatchEvent(new Event('input',{bubbles:true}));"
                         + "    box.dispatchEvent(new Event('change',{bubbles:true}));"
@@ -617,7 +749,6 @@ public class MainActivity extends AppCompatActivity {
 
                         + "}else{"
 
-                        // ==== PLAN B: fallback generic ====
                         + "  const type=(el,txt)=>{"
                         + "    el.focus();"
                         + "    el.value='';"
@@ -673,6 +804,12 @@ public class MainActivity extends AppCompatActivity {
         try { if (scanReceiver != null) unregisterReceiver(scanReceiver); } catch (Exception ignored) {}
         scanHandler.removeCallbacksAndMessages(null);
         super.onStop();
+    }
+
+    @Override
+    protected void onDestroy() {
+        dismissCustomerDisplay();
+        super.onDestroy();
     }
 
     // ============== FILE CHOOSER ==============
